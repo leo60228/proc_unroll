@@ -3,7 +3,8 @@
 //! * `for pat in int..int`
 //! * `for pat in &[elem, elem]`
 //!
-//! Example:
+//! # Examples
+//! Simple example using a range:
 //! ```
 //! #[proc_unroll::unroll]
 //! fn unrolled() -> Vec<u32> {
@@ -15,16 +16,29 @@
 //! }
 //! assert_eq!(unrolled(), (10..20).collect::<Vec<_>>());
 //! ```
+//! You can also use it in a `const fn`:
+//! ```
+//! #[proc_unroll::unroll]
+//! const fn inner() -> i64 {
+//!     let mut total = 0;
+//!     for x in &[5, 15, 30] {
+//!         total += *x;
+//!     }
+//!     total
+//! }
+//!
+//! assert_eq!(inner(), 50);
+//! ```
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::*;
-use quote::{quote_spanned, ToTokens};
+use quote::{quote, quote_spanned, ToTokens};
 use std::ops::Range;
 use syn::{
-    parse_macro_input, parse_quote,
+    fold::{self, Fold},
+    parse_macro_input,
     spanned::Spanned,
-    visit_mut::{self, VisitMut},
-    Block, Expr, ExprArray, ExprForLoop, ExprLit, ExprRange, ExprReference, ExprUnary, ItemFn, Lit,
-    LitInt, Stmt, UnOp,
+    Expr, ExprArray, ExprForLoop, ExprLit, ExprRange, ExprReference, ExprUnary, ItemFn, Lit,
+    LitInt, UnOp,
 };
 
 struct Unroller {
@@ -128,47 +142,37 @@ impl Unroller {
     fn unroll_iter(&self, idx: isize, expr: &ExprForLoop) -> TokenStream {
         let init = (self.map)(idx);
         let pat = &expr.pat;
-        let body = &expr.body.stmts;
+        let block = &expr.body;
         let span = Self::span(expr);
-        quote_spanned! {span=>
+        quote_spanned!(span=> {
             let #pat = #init;
-            #(#body)*
-        }
+            #block
+        })
     }
 
-    pub fn unroll(&self, expr: &ExprForLoop) -> Block {
+    pub fn unroll(&self, expr: &ExprForLoop) -> TokenStream {
         let iter = self.range.clone().map(|idx| self.unroll_iter(idx, expr));
 
         // providing a span here isn't necessary since all tokens come from unroll_iter
-        parse_quote! {{
+        quote! {{
             #(#iter)*
         }}
     }
 }
 
-fn unroll_loop(expr: &ExprForLoop) -> Block {
+fn unroll_loop(expr: &ExprForLoop) -> Expr {
     let unroller = Unroller::new(expr);
-    unroller.unroll(expr)
+    syn_unwrap(syn::parse2(unroller.unroll(expr)))
 }
 
 struct Unroll;
 
-impl VisitMut for Unroll {
-    fn visit_block_mut(&mut self, i: &mut Block) {
-        let mut stmts = Vec::new();
-        for stmt in &i.stmts {
-            match stmt {
-                Stmt::Expr(Expr::ForLoop(for_loop)) => stmts.extend(unroll_loop(&for_loop).stmts),
-                Stmt::Semi(Expr::ForLoop(for_loop), _) => {
-                    stmts.extend(unroll_loop(&for_loop).stmts)
-                }
-                other => stmts.push(other.clone()),
-            }
+impl Fold for Unroll {
+    fn fold_expr(&mut self, i: Expr) -> Expr {
+        match i {
+            Expr::ForLoop(for_loop) => unroll_loop(&for_loop),
+            _ => fold::fold_expr(self, i),
         }
-        *i = Block {
-            brace_token: i.brace_token,
-            stmts,
-        };
     }
 }
 
@@ -178,7 +182,8 @@ pub fn unroll(
     _attr: proc_macro::TokenStream,
     tokens: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let mut input = parse_macro_input!(tokens as ItemFn);
-    visit_mut::visit_item_fn_mut(&mut Unroll, &mut input);
-    input.into_token_stream().into()
+    let input = parse_macro_input!(tokens as ItemFn);
+    fold::fold_item_fn(&mut Unroll, input)
+        .into_token_stream()
+        .into()
 }
