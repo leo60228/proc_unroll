@@ -17,14 +17,14 @@
 //! ```
 use proc_macro2::{Span, TokenStream};
 use proc_macro_error::*;
-use quote::{quote, quote_spanned, ToTokens};
+use quote::{quote_spanned, ToTokens};
 use std::ops::Range;
 use syn::{
-    fold::{self, Fold},
-    parse_macro_input,
+    parse_macro_input, parse_quote,
     spanned::Spanned,
-    Expr, ExprArray, ExprForLoop, ExprLit, ExprRange, ExprReference, ExprUnary, ItemFn, Lit,
-    LitInt, UnOp,
+    visit_mut::{self, VisitMut},
+    Block, Expr, ExprArray, ExprForLoop, ExprLit, ExprRange, ExprReference, ExprUnary, ItemFn, Lit,
+    LitInt, Stmt, UnOp,
 };
 
 struct Unroller {
@@ -128,37 +128,47 @@ impl Unroller {
     fn unroll_iter(&self, idx: isize, expr: &ExprForLoop) -> TokenStream {
         let init = (self.map)(idx);
         let pat = &expr.pat;
-        let block = &expr.body;
+        let body = &expr.body.stmts;
         let span = Self::span(expr);
-        quote_spanned!(span=> {
+        quote_spanned! {span=>
             let #pat = #init;
-            #block
-        })
+            #(#body)*
+        }
     }
 
-    pub fn unroll(&self, expr: &ExprForLoop) -> TokenStream {
+    pub fn unroll(&self, expr: &ExprForLoop) -> Block {
         let iter = self.range.clone().map(|idx| self.unroll_iter(idx, expr));
 
         // providing a span here isn't necessary since all tokens come from unroll_iter
-        quote! {{
+        parse_quote! {{
             #(#iter)*
         }}
     }
 }
 
-fn unroll_loop(expr: &ExprForLoop) -> Expr {
+fn unroll_loop(expr: &ExprForLoop) -> Block {
     let unroller = Unroller::new(expr);
-    syn_unwrap(syn::parse2(unroller.unroll(expr)))
+    unroller.unroll(expr)
 }
 
 struct Unroll;
 
-impl Fold for Unroll {
-    fn fold_expr(&mut self, i: Expr) -> Expr {
-        match i {
-            Expr::ForLoop(for_loop) => unroll_loop(&for_loop),
-            _ => fold::fold_expr(self, i),
+impl VisitMut for Unroll {
+    fn visit_block_mut(&mut self, i: &mut Block) {
+        let mut stmts = Vec::new();
+        for stmt in &i.stmts {
+            match stmt {
+                Stmt::Expr(Expr::ForLoop(for_loop)) => stmts.extend(unroll_loop(&for_loop).stmts),
+                Stmt::Semi(Expr::ForLoop(for_loop), _) => {
+                    stmts.extend(unroll_loop(&for_loop).stmts)
+                }
+                other => stmts.push(other.clone()),
+            }
         }
+        *i = Block {
+            brace_token: i.brace_token,
+            stmts,
+        };
     }
 }
 
@@ -168,8 +178,7 @@ pub fn unroll(
     _attr: proc_macro::TokenStream,
     tokens: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let input = parse_macro_input!(tokens as ItemFn);
-    fold::fold_item_fn(&mut Unroll, input)
-        .into_token_stream()
-        .into()
+    let mut input = parse_macro_input!(tokens as ItemFn);
+    visit_mut::visit_item_fn_mut(&mut Unroll, &mut input);
+    input.into_token_stream().into()
 }

@@ -49,3 +49,31 @@ make_test!(slice -> Vec<isize>, {
     }
     vec
 });
+
+#[test]
+fn const_fn_range() {
+    #[unroll]
+    const fn inner() -> usize {
+        let total = 0;
+        for x in 1..5 {
+            let total = total + x;
+        }
+        total
+    }
+
+    assert_eq!(inner(), 10);
+}
+
+#[test]
+fn const_fn_slice() {
+    #[unroll]
+    const fn inner() -> i32 {
+        let total = 0;
+        for x in &[5, 15] {
+            let total = total + *x;
+        }
+        total
+    }
+
+    assert_eq!(inner(), 20);
+}
